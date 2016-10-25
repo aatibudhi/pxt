@@ -583,8 +583,7 @@ function travisAsync() {
                 }
                 let trg = readLocalPxTarget()
                 if (rel)
-                    return Promise.resolve() //preCacheHexAsync()
-                        .then(() => uploadTargetAsync(trg.id + "/" + rel))
+                    return uploadTargetAsync(trg.id + "/" + rel)
                         .then(() => npmPublish ? runNpmAsync("publish") : Promise.resolve())
                         .then(() => uploadTargetTranslationsAsync())
                 else
@@ -1337,6 +1336,7 @@ export function buildTargetAsync(): Promise<void> {
         .then(buildSemanticUIAsync)
         .then(() => buildFolderAsync('cmds', true))
         .then(() => buildFolderAsync('server', true))
+        .then(() => preCacheHexAsync());
 }
 
 function buildFolderAsync(p: string, optional?: boolean): Promise<void> {
@@ -3877,59 +3877,51 @@ function writeProjects(prjs: SavedProject[], outDir: string): string[] {
 }
 
 export function preCacheHexAsync() {
-    let trgInfo = readLocalPxTarget();
+    pxt.log("----- Offline HEX cache");
+    mainPkg = new pxt.MainPackage(new Host()); // Fix for precaching HEX files during a target build
 
-    if (!trgInfo) {
-        console.error("pxtarget.json not found; make sure you are in a valid PXT target directory");
+    let projectPath = path.join("libs", "templates", "blocksprj");
+    let builtRoot = "built";
+    let cachePath = path.join(builtRoot, "hexcache");
+
+    if (!fs.existsSync(projectPath)) {
+        console.error("Default blocksprj missing from target");
         return Promise.resolve();
     }
 
-    // Extract the target's default project to disk
-    if (!trgInfo.blocksprj) {
-        console.error("Could not find default project 'blocksprj' in pxtarget.json");
-        return Promise.resolve();
-    }
+    // Cleanup
+    nodeutil.deleteFolderRecursive(cachePath);
+    nodeutil.deleteFolderRecursive(path.join(projectPath, "pxt_modules"));
+    nodeutil.deleteFolderRecursive(path.join(projectPath, "built"));
 
-    let projectPath = path.join("built", "precache");
-
-    if (fs.existsSync(projectPath)) {
-        nodeutil.deleteFolderRecursive(projectPath);
-    }
-
-    nodeutil.mkdirP(projectPath);
-    trgInfo.blocksprj.config.name = path.basename(projectPath);
-    fs.writeFileSync(path.join(projectPath, "pxt.json"), JSON.stringify(trgInfo.blocksprj.config, null, 4));
-    Object.keys(trgInfo.blocksprj.files).forEach((f) => {
-        fs.writeFileSync(path.join(projectPath, f), trgInfo.blocksprj.files[f]);
-    });
-    pxt.log("default project extracted");
+    pxt.log(`Using template blocksprj: ${projectPath}`);
+    nodeutil.mkdirP(cachePath);
 
     // Install package dependencies
     let previousCwd = process.cwd();
     process.chdir(projectPath);
+    pxt.log("[pxt install]");
 
     return installAsync()
         .then(() => {
-            pxt.log("packages installed");
-
             // Build in the cloud
+            pxt.log("[pxt build --cloud]");
             forceCloudBuild = true;
             return buildCoreAsync({ mode: BuildOption.JustBuild });
         })
         .then((compileOpts: pxtc.CompileOptions) => {
             if (!compileOpts) {
-                console.log("Failed to extract HEX image");
+                console.log("Failed to extract HEX image (build appears to have failed)");
                 return;
             }
 
             // Place the base HEX image in the hex cache if necessary
+            process.chdir(previousCwd);
+            pxt.log("Copying base HEX file from build to the cache");
+
             let sha = compileOpts.extinfo.sha;
             let hex: string[] = compileOpts.hexinfo.hex;
-            let hexCache = path.join(previousCwd, "hexcache");
-            let hexFile = path.join(hexCache, sha + ".hex");
-
-            process.chdir(previousCwd);
-            nodeutil.mkdirP(hexCache);
+            let hexFile = path.join(cachePath, sha + ".hex");
 
             if (fs.existsSync(hexFile)) {
                 pxt.log("HEX image already in offline cache");
